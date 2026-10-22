@@ -28,7 +28,7 @@ class MinHashConfig:
     seed: int = 1
     lsh_threshold: float = 0.85
     similarity_threshold: float = 0.85
-    verify_similarity: bool = True
+    verify_similarity: bool = False
 
     def __post_init__(self):
         """Reject incompatible or invalid signature and similarity settings."""
@@ -145,16 +145,12 @@ class MinHashDeduplicator:
                 return True
         return False
 
-    def deduplicate(self, dataset, desc=None, num_proc=None, batch_size=256):
-        """Return kept indices and a duplicate-index set for a regular Dataset.
+    def compute_signatures(self, dataset, num_proc=None, batch_size=256):
+        """Compute reusable signatures in dataset row order.
 
-        Compute signatures in parallel, then query one fresh LSH index in input
-        order. Only retained documents enter that index. Documents without
-        n-grams bypass LSH; exact deduplication remains a separate stage.
-        Verification uses MinHash estimates and cannot recover LSH misses.
-        Set num_proc=1 to disable multiprocessing.
+        Reuse only with the same dataset, row order, text column, ngram_size,
+        num_perm, scheme, and seed. LSH and verification thresholds may change.
         """
-        config = self.config
         if num_proc is not None and num_proc < 1:
             raise ValueError('num_proc must be positive')
         if batch_size < 1:
@@ -162,12 +158,16 @@ class MinHashDeduplicator:
         if self.text_column not in dataset.column_names:
             raise ValueError(f"Missing text column: {self.text_column!r}")
         if len(dataset) == 0:
-            return [], set()
-
+            from datasets import Dataset
+            return Dataset.from_dict(
+                {"minhash_values": []},
+                features=Features({"minhash_values": Sequence(Value("uint64"))}),
+            )
+        config = self.config
         if num_proc is None:
             num_proc = min(4, os.cpu_count() or 1)
 
-        signatures = dataset.select_columns([self.text_column]).map(
+        return dataset.select_columns([self.text_column]).map(
             _compute_minhash_batch,
             fn_kwargs={"config": config, "text_column": self.text_column},
             batched=True,
@@ -181,6 +181,37 @@ class MinHashDeduplicator:
             features=Features({"minhash_values": Sequence(Value("uint64"))}),
             desc="Computing MinHash signatures",
         )
+
+
+    def deduplicate(self, dataset, desc=None, num_proc=None, batch_size=256, *, signatures=None):
+        """Return kept indices and a duplicate-index set for a regular Dataset.
+
+        Compute signatures in parallel, then query one fresh LSH index in input
+        order. Only retained documents enter that index. Documents without
+        n-grams bypass LSH; exact deduplication remains a separate stage.
+        Verification uses MinHash estimates and cannot recover LSH misses.
+        Set num_proc=1 to disable multiprocessing. Supply signatures from
+        compute_signatures() to skip hashing; dataset order, text column, and
+        signature settings must match. Only thresholds may vary between runs.
+        """
+        config = self.config
+        if num_proc is not None and num_proc < 1:
+            raise ValueError('num_proc must be positive')
+        if batch_size < 1:
+            raise ValueError('batch_size must be positive')
+        if self.text_column not in dataset.column_names:
+            raise ValueError(f"Missing text column: {self.text_column!r}")
+        if len(dataset) == 0:
+            return [], set()
+
+        if signatures is None:
+            signatures = self.compute_signatures(
+                dataset, num_proc=num_proc, batch_size=batch_size,
+            )
+        elif len(signatures) != len(dataset):
+            raise ValueError('signatures must have the same row count as dataset')
+        if "minhash_values" not in signatures.column_names:
+            raise ValueError('signatures must contain minhash_values')
 
         # A fresh index prevents state leaking into subsequent dataset runs.
         lsh = MinHashLSH(
