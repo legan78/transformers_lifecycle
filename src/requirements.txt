@@ -1,0 +1,11 @@
+datasets
+datasketch
+huggingface-hub
+ipykernel
+ipywidgets
+matplotlib
+numpy
+pandas
+tqdm
+transformers
+wordcloud
