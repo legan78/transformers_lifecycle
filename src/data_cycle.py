@@ -8,7 +8,7 @@ from collections import Counter
 import hashlib
 
 import tqdm
-from datasets import load_dataset
+from datasets import Features, Sequence, Value, load_dataset
 
 _LOGGER = logging.getLogger(__name__)
  
@@ -106,43 +106,6 @@ def load_python_code_dataset():
     )
 
 
-def normalize_unicode(text: str) -> str:
-    return unicodedata.normalize("NFKC", text)
-
-
-def normalize_whitespace(text: str, max_new_lines=3) -> str:
-    # Normalize line endings
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
-    
-    # Collapse multiple spaces
-    text = re.sub(r"[ \t]+", " ", text)
-    
-    # Collapse excessive newlines (keep a maximum of max_new_lines-1)
-    text = re.sub(rf"\n{max_new_lines,}", "\n\n", text)
-
-    # Stripping 
-    return text.strip()
-
-
-def remove_control_chars(text: str) -> str:
-    return "".join(ch for ch in text if unicodedata.category(ch)[0] != "C" or ch in "\n\t")
-
-
-def normalize_punctuation(text: str) -> str:
-    # Remove curly quotes with simple qoutes
-    replacements = {
-        "“": '"',
-        "”": '"',
-        "‘": "'",
-        "’": "'",
-        "—": "-",
-        "–": "-",
-    }
-    for k, v in replacements.items():
-        text = text.replace(k, v)
-    return text
-
-
 def clean_html(text: str) -> str:
     # Unescape HTML entities
     text = html.unescape(text)
@@ -151,23 +114,6 @@ def clean_html(text: str) -> str:
     text = re.sub(r"<[^>]+>", "", text)
     
     return text
-
-
-def normalize_text(text: str) -> str:
-    text = normalize_unicode(text)
-    text = clean_html(text)
-    text = remove_control_chars(text)
-    text = normalize_punctuation(text)
-    text = normalize_whitespace(text)
-    return text
-
-
-def normalize_batch(batch):
-    return {
-        "text": [normalize_text(x) for x in batch["text"]]
-    }
-
-
 
 
 # We generate a hash of the normalized text using SHA256 -> stable hash
@@ -206,25 +152,153 @@ SIM_THRESHOLD = 0.85  # Threshold to define if two documents are similar
 NGRAM_SIZE = 5        # Size of the N-Gram
 
 
+# Domain-specific text normalization
+from dataclasses import dataclass
+from functools import partial
+
+
+@dataclass(frozen=True)
+class NormalizationConfig:
+    """Parameters for transformations selected by the ordered key list."""
+
+    # NFC/NFD compose/decompose canonically equivalent characters.
+    # NFKC/NFKD also fold compatibility distinctions, such as full-width Ａ → A.
+    unicode_form: str = "NFC"
+    max_new_lines: int = 3
+
+    def __post_init__(self):
+        """Validate the Unicode form and positive consecutive-newline limit."""
+        if self.unicode_form not in ("NFC", "NFD", "NFKC", "NFKD"):
+            raise ValueError("unicode_form must be NFC, NFD, NFKC, or NFKD")
+        if isinstance(self.max_new_lines, bool) or not isinstance(self.max_new_lines, int):
+            raise TypeError("max_new_lines must be a positive integer")
+        if self.max_new_lines < 1:
+            raise ValueError("max_new_lines must be positive")
+
+
+DEFAULT_NORMALIZATION_CONFIG = NormalizationConfig()
+
+
+def normalize_line_endings(text: str) -> str:
+    """Convert Windows CRLF and standalone CR line endings to LF."""
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def normalize_unicode(text: str, form: str = "NFC") -> str:
+    """Normalize Unicode characters using the requested normalization form."""
+    # NFC: canonical decomposition followed by composition (e + accent → é).
+    # NFD: canonical decomposition (é → e + combining accent).
+    # NFKC: compatibility decomposition followed by composition (e.g. Ａ → A).
+    # NFKD: compatibility decomposition without recomposing characters.
+    return unicodedata.normalize(form, text)
+
+
+def collapse_horizontal_whitespace(text: str) -> str:
+    """Replace runs of spaces and tabs with a single space."""
+    return re.sub(r"[ \t]+", " ", text)
+
+
+def limit_consecutive_newlines(text: str, max_new_lines: int = 3) -> str:
+    """Cap each run of consecutive newlines at the requested positive limit."""
+    if max_new_lines < 1:
+        raise ValueError("max_new_lines must be positive")
+    return re.sub(r"\n{%d,}" % (max_new_lines + 1), "\n" * max_new_lines, text)
+
+
+def strip_whitespace(text: str) -> str:
+    """Remove whitespace from the beginning and end of the text."""
+    return text.strip()
+
+
+def normalize_punctuation(text: str) -> str:
+    """Replace curly quotes and long dashes with ASCII quotes and hyphens."""
+    return text.translate(str.maketrans({
+        "“": '"', "”": '"', "‘": "'", "’": "'", "—": "-", "–": "-",
+    }))
+
+
+# Each helper accepts text and returns transformed text. Keys run in list order.
+NORMALIZATION_TRANSFORMS = {
+    "line_endings": normalize_line_endings,
+    "unicode": normalize_unicode,
+    "unicode_nfc": normalize_unicode,
+    "unicode_nfd": partial(normalize_unicode, form="NFD"),
+    "unicode_nfkc": partial(normalize_unicode, form="NFKC"),
+    "unicode_nfkd": partial(normalize_unicode, form="NFKD"),
+    "collapse_spaces": collapse_horizontal_whitespace,
+    "limit_newlines": limit_consecutive_newlines,
+    "punctuation": normalize_punctuation,
+    "strip": strip_whitespace,
+}
+
+PROSE_NORMALIZATION = [
+    "line_endings", "unicode", "collapse_spaces", "limit_newlines", "strip",
+]
+CODE_NORMALIZATION = ["line_endings"]
+
+
+def _normalization_transforms(keys, config=DEFAULT_NORMALIZATION_CONFIG):
+    """Resolve ordered keys to helpers with configuration parameters applied."""
+    transforms = NORMALIZATION_TRANSFORMS.copy()
+    transforms["unicode"] = partial(normalize_unicode, form=config.unicode_form)
+    transforms["limit_newlines"] = partial(
+        limit_consecutive_newlines, max_new_lines=config.max_new_lines
+    )
+    try:
+        return [transforms[key] for key in keys]
+    except KeyError as error:
+        raise ValueError(f"Unknown normalization transformation: {error.args[0]}") from error
+
+
+def normalize_text(
+    text: str, transformations=None, config=DEFAULT_NORMALIZATION_CONFIG
+) -> str:
+    """Apply named transformations in order; default to the prose preset."""
+    if transformations is None:
+        transformations = PROSE_NORMALIZATION
+    for transform in _normalization_transforms(transformations, config):
+        text = transform(text)
+    return text
+
+
+def normalize_batch(batch, transformations=None, config=DEFAULT_NORMALIZATION_CONFIG):
+    """Normalize a Dataset.map batch using keys supplied through fn_kwargs."""
+    if transformations is None:
+        transformations = PROSE_NORMALIZATION
+    transforms = _normalization_transforms(transformations, config)
+    texts = []
+    for text in batch["text"]:
+        for transform in transforms:
+            text = transform(text)
+        texts.append(text)
+    return {"text": texts}
+
+
+# MinHash similarity deduplication
 def get_word_ngrams(text: str, n: int = NGRAM_SIZE):
     words = re.findall(r"\w+", text.lower())
     return {" ".join(words[i:i+n]) for i in range(len(words) - n + 1)}
 
 
 def compute_minhash(text: str):
+    """Build a signature, or return None when no word n-grams exist."""
+    ngrams = get_word_ngrams(text)
+    if not ngrams:
+        return None
     m = MinHash(num_perm=NUM_PERM, scheme=MINHASH_SCHEME)
-    for ngram in get_word_ngrams(text):
+    for ngram in ngrams:
         m.update(ngram.encode("utf-8"))
     return m
 
 
 def _compute_minhash_batch(batch):
     """Return serializable signatures for Dataset.map worker processes."""
-    return {
-        "minhash_values": [
-            compute_minhash(text).hashvalues.tolist() for text in batch["text"]
-        ]
-    }
+    signatures = []
+    for text in batch["text"]:
+        minhash = compute_minhash(text)
+        signatures.append([] if minhash is None else minhash.hashvalues.tolist())
+    return {"minhash_values": signatures}
+
 
 
 def get_unique_by_lsh(dataset, desc=None, num_proc=None, batch_size=256):
@@ -232,6 +306,8 @@ def get_unique_by_lsh(dataset, desc=None, num_proc=None, batch_size=256):
 
     Expects a regular Hugging Face Dataset. Returns a list of kept indices
     and a set of duplicate indices, both relative to the input dataset.
+    Documents without word n-grams are retained without querying or entering
+    the LSH index. Exact deduplication remains a separate preprocessing stage.
     Set num_proc=1 to compute signatures without multiprocessing.
     """
     if num_proc is not None and num_proc < 1:
@@ -250,6 +326,8 @@ def get_unique_by_lsh(dataset, desc=None, num_proc=None, batch_size=256):
         batch_size=batch_size,
         num_proc=min(num_proc, len(dataset)),
         remove_columns=["text"],
+        # Explicit types also support worker batches containing only short texts.
+        features=Features({"minhash_values": Sequence(Value("uint64"))}),
         desc="Computing MinHash signatures",
     )
 
@@ -263,6 +341,10 @@ def get_unique_by_lsh(dataset, desc=None, num_proc=None, batch_size=256):
     duplicate_indices = set()
     
     for idx, example in tqdm.tqdm(enumerate(signatures), total=len(dataset), desc=desc):
+        if not example["minhash_values"]:
+            keep_indices.append(idx)
+            continue
+
         minhash = MinHash(
             num_perm=NUM_PERM,
             hashvalues=example["minhash_values"],
@@ -279,4 +361,5 @@ def get_unique_by_lsh(dataset, desc=None, num_proc=None, batch_size=256):
             duplicate_indices.add(idx)
 
     return keep_indices, duplicate_indices
+
 
