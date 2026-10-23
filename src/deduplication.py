@@ -1,6 +1,7 @@
 """Deduplication."""
 
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass, replace
@@ -13,6 +14,9 @@ if __package__:
     from ._validation import _text_batch_values, _validate_text_column_name
 else:
     from _validation import _text_batch_values, _validate_text_column_name
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 # Deduplication
@@ -232,6 +236,8 @@ class MinHashDeduplicator:
             # LSH retrieves candidates among previously kept documents. A returned
             # candidate is not proof that the requested similarity is satisfied.
             candidates = lsh.query(signature)
+            if not candidates:
+                _LOGGER.info("No LSH candidates retrieved for document at index %d", index)
             is_duplicate = self._is_duplicate(signature, candidates, signatures)
 
             # Only retained documents enter the index, preserving first-kept order.
