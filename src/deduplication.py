@@ -206,6 +206,7 @@ class MinHashDeduplicator:
         if self.text_column not in dataset.column_names:
             raise ValueError(f"Missing text column: {self.text_column!r}")
         if len(dataset) == 0:
+            _LOGGER.info("Total LSH candidates retrieved: %d", 0)
             return [], set()
 
         if signatures is None:
@@ -225,6 +226,7 @@ class MinHashDeduplicator:
 
         keep_indices = []
         duplicate_indices = set()
+        total_candidates = 0
 
         for index, example in tqdm.tqdm(enumerate(signatures), total=len(dataset), desc=desc):
             if not example["minhash_values"]:
@@ -236,8 +238,7 @@ class MinHashDeduplicator:
             # LSH retrieves candidates among previously kept documents. A returned
             # candidate is not proof that the requested similarity is satisfied.
             candidates = lsh.query(signature)
-            if not candidates:
-                _LOGGER.info("No LSH candidates retrieved for document at index %d", index)
+            total_candidates += len(candidates)
             is_duplicate = self._is_duplicate(signature, candidates, signatures)
 
             # Only retained documents enter the index, preserving first-kept order.
@@ -247,6 +248,7 @@ class MinHashDeduplicator:
             else:
                 duplicate_indices.add(index)
 
+        _LOGGER.info("Total LSH candidates retrieved: %d", total_candidates)
         return keep_indices, duplicate_indices
 
 

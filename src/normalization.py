@@ -1,6 +1,7 @@
 """Text normalization."""
 
 import html
+import logging
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -13,6 +14,37 @@ else:
 
 
 # Text normalization
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def has_nonempty_text(example, text_column="text"):
+    """Return whether a row contains a string with non-whitespace content."""
+    text = example[text_column]
+    return isinstance(text, str) and bool(text.strip())
+
+
+def remove_empty_texts_in_dataset(dataset, text_column="text", num_proc=None):
+    """Filter empty, whitespace-only, null, and non-string text after normalization."""
+    _validate_text_column_name(text_column)
+    if text_column not in dataset.column_names:
+        raise ValueError(f"Missing text column: {text_column!r}")
+    if num_proc is not None and num_proc < 1:
+        raise ValueError("num_proc must be positive")
+    previous_count = len(dataset)
+    filtered = dataset.filter(
+        has_nonempty_text,
+        fn_kwargs={"text_column": text_column},
+        num_proc=num_proc,
+        desc="Removing empty texts",
+    )
+    removed = previous_count - len(filtered)
+    percentage = 100 * removed / previous_count if previous_count else 0.0
+    _LOGGER.info(
+        "Removed %d empty documents (%.2f%%); retained %d of %d",
+        removed, percentage, len(filtered), previous_count,
+    )
+    return filtered
 
 
 @dataclass(frozen=True)

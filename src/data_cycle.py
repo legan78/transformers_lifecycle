@@ -32,6 +32,8 @@ if __package__:
         normalize_text,
         normalize_batch,
         clean_html,
+        has_nonempty_text,
+        remove_empty_texts_in_dataset,
     )
     from .deduplication import (
         MinHashConfig,
@@ -86,6 +88,8 @@ else:
         normalize_text,
         normalize_batch,
         clean_html,
+        has_nonempty_text,
+        remove_empty_texts_in_dataset,
     )
     from deduplication import (
         MinHashConfig,
