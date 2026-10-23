@@ -1,13 +1,78 @@
 """Dataset and token diagnostics."""
 
 import logging
+import html
 from collections import Counter
 from dataclasses import dataclass
+from itertools import islice
+from numbers import Integral
 
 _LOGGER = logging.getLogger(__name__)
 
 
 # Dataset and token diagnostics
+
+
+def display_duplicate_pairs(dataset, pairs, text_column="text", max_pairs=5, output="pandas"):
+    """Preview (original_index, duplicate_index) pairs from any detection method.
+
+    Both indices refer to rows in the supplied dataset before duplicate removal.
+    Display a styled table and return its DataFrame for output='pandas'. Return
+    an escaped Markdown table string for output='markdown', or a styled HTML
+    table string for output='html', without displaying either export.
+    Only consume up to max_pairs pairs; document text is shown in full.
+    """
+    if output not in ("pandas", "markdown", "html"):
+        raise ValueError("output must be 'pandas', 'markdown', or 'html'")
+    if isinstance(max_pairs, bool) or not isinstance(max_pairs, int):
+        raise TypeError("max_pairs must be an integer")
+    if max_pairs < 0:
+        raise ValueError("max_pairs must be nonnegative")
+    if text_column not in dataset.column_names:
+        raise ValueError(f"Missing text column: {text_column!r}")
+
+    columns = ['Original index', 'Duplicate index', 'Original text', 'Duplicate text']
+    rows = []
+    for original_index, duplicate_index in islice(pairs, max_pairs):
+        for index in (original_index, duplicate_index):
+            if isinstance(index, bool) or not isinstance(index, Integral):
+                raise TypeError("Pair indices must be integers")
+            if not 0 <= index < len(dataset):
+                raise IndexError(f"Document index out of range: {index}")
+        rows.append([
+            int(original_index), int(duplicate_index),
+            dataset[int(original_index)][text_column],
+            dataset[int(duplicate_index)][text_column],
+        ])
+
+    if output == "markdown":
+        def escape_cell(value):
+            text = html.escape(str(value), quote=False)
+            # Encode Markdown syntax and preserve line breaks inside table cells.
+            for character in "\\`*_{}[]()#+-.!|~":
+                text = text.replace(character, f"&#{ord(character)};")
+            return text.replace('\r\n', '\n').replace('\r', '\n').replace('\n', '<br>')
+
+        lines = ['| ' + ' | '.join(columns) + ' |', '| ' + ' | '.join(['---'] * len(columns)) + ' |']
+        lines.extend('| ' + ' | '.join(escape_cell(value) for value in row) + ' |' for row in rows)
+        return '\n'.join(lines)
+
+    import pandas as pd
+
+    table = pd.DataFrame(rows, columns=columns)
+    styled_table = (
+        table.style.hide(axis='index')
+        .set_properties(**{'white-space': 'pre-wrap', 'text-align': 'left', 'vertical-align': 'top'})
+        .format(escape='html')
+        .set_caption(f'Showing {len(rows)} duplicate pairs (limit: {max_pairs})')
+    )
+    if output == "html":
+        return styled_table.to_html()
+
+    from IPython.display import display
+
+    display(styled_table)
+    return table
 
 
 @dataclass(frozen=True)
