@@ -55,6 +55,7 @@ if __package__:
         is_informative_token,
         filter_token_counts_for_display,
         display_dataset_information,
+        display_duplicate_pairs,
     )
 else:
     from sources import (
@@ -111,4 +112,5 @@ else:
         is_informative_token,
         filter_token_counts_for_display,
         display_dataset_information,
+        display_duplicate_pairs,
     )

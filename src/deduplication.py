@@ -73,20 +73,25 @@ def add_text_hash(batch, text_column="text"):
 
 # We then maintain a set of unique elements to filter if the
 # element had already been open before
-def remove_exact_dedups_in_dataset(dataset):
-    seen = set()
+def remove_exact_dedups_in_dataset(dataset, *, return_pairs=False):
+    """Keep the first row per text hash; optionally return matching index pairs.
 
-    def is_unique(example):
-        text_hash = example["text_hash"]
-        if text_hash in seen:
-            return False
-        seen.add(text_hash)
-        return True
-
-    return dataset.filter(
-        is_unique,
-        desc="Removing exact duplicates",
-    )
+    With return_pairs=True, return (filtered_dataset, pairs), where each pair
+    is (original_index, duplicate_index) in the input dataset's row order.
+    """
+    first_index_by_hash = {}
+    keep_indices = []
+    pairs = []
+    for index, example in enumerate(dataset.select_columns(['text_hash'])):
+        text_hash = example['text_hash']
+        if text_hash in first_index_by_hash:
+            if return_pairs:
+                pairs.append((first_index_by_hash[text_hash], index))
+        else:
+            first_index_by_hash[text_hash] = index
+            keep_indices.append(index)
+    filtered = dataset.select(keep_indices)
+    return (filtered, pairs) if return_pairs else filtered
 
 
 def get_word_ngrams(text: str, n: int = DEFAULT_MINHASH_CONFIG.ngram_size):
@@ -167,6 +172,7 @@ class MinHashDeduplicator:
                 {"minhash_values": []},
                 features=Features({"minhash_values": Sequence(Value("uint64"))}),
             )
+        self.last_total_candidates = 0
         config = self.config
         if num_proc is None:
             num_proc = min(4, os.cpu_count() or 1)
@@ -198,6 +204,7 @@ class MinHashDeduplicator:
         compute_signatures() to skip hashing; dataset order, text column, and
         signature settings must match. Only thresholds may vary between runs.
         """
+        self.last_total_candidates = 0
         config = self.config
         if num_proc is not None and num_proc < 1:
             raise ValueError('num_proc must be positive')
@@ -248,6 +255,7 @@ class MinHashDeduplicator:
             else:
                 duplicate_indices.add(index)
 
+        self.last_total_candidates = total_candidates
         _LOGGER.info("Total LSH candidates retrieved: %d", total_candidates)
         return keep_indices, duplicate_indices
 
