@@ -189,7 +189,7 @@ class MinHashDeduplicator:
             # Declare lists of uint64 explicitly to support empty signatures and
             # the full unsigned hash range, including the affine64 scheme.
             features=Features({"minhash_values": Sequence(Value("uint64"))}),
-            desc="Computing MinHash signatures",
+            desc=f"{config.ngram_size}-gram: Computing MinHash signatures",
         )
 
 
