@@ -1,10 +1,11 @@
-"""Normalize both splits, save training signatures, and run the n-gram experiment.
+"""Normalize, remove exact duplicates, generate signatures, and compare n-gram sizes.
 
 Run: python scripts/run_normalization_and_minhash_signatures.py --config configs/dataset_cycle.json
 Uses minhash.ngram_sizes and the existing preparation settings from the JSON.
-The experiment runs on normalized training data before exact deduplication.
-Completed preparation, matching signatures, and experiments are reused.
---overwrite rebuilds all three stages.
+The experiment runs on training data after exact deduplication.
+Completed preparation, exact deduplication, signatures, and experiments are reused.
+--output-dir selects the experiment directory containing signatures/ and results/.
+--overwrite rebuilds all four stages.
 """
 
 import argparse
@@ -19,9 +20,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def run_normalization_and_signatures(config, overwrite=False):
-    """Run preparation, signature generation, and the n-gram sweep sequentially."""
+def run_normalization_and_signatures(config, overwrite=False, output_dir=None):
+    """Run preparation, exact deduplication, signatures, and the n-gram sweep."""
     root = (PROJECT_ROOT / config['artifacts_dir']).resolve()
+    output_dir = Path(output_dir).resolve() if output_dir is not None else root / 'exact_dedup_ngram_experiment'
 
     # Reuse saved preparation when both splits and the cleaning metrics exist.
     preparation_outputs = [root / name for name in
@@ -39,12 +41,29 @@ def run_normalization_and_signatures(config, overwrite=False):
     else:
         logging.info('Reusing saved normalized datasets at %s', root)
 
-    # Generate signatures from normalized training rows, before any deduplication.
+    # Remove exact duplicates before comparing additional MinHash removals.
+    exact_outputs = [root / name for name in (
+        'exact_dedup_train', 'exact_dedup_validation',
+        'exact_dedup_metrics.csv', 'exact_duplicate_pairs.csv',
+    )]
+    if overwrite or not all(path.exists() for path in exact_outputs):
+        command = [
+            sys.executable, str(PROJECT_ROOT / 'scripts/run_exact_deduplication.py'),
+            '--artifacts-dir', str(root), '--num-proc', str(config['num_proc']),
+            '--batch-size', str(config['batch_size']),
+        ]
+        if overwrite:
+            command.append('--overwrite')
+        subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    else:
+        logging.info('Reusing saved exact-deduplicated datasets at %s', root)
+
+    # Generate signatures from the exact-deduplicated training rows.
     settings = config['minhash']
     command = [
         sys.executable, str(PROJECT_ROOT / 'scripts/run_minhash_signatures.py'),
-        '--input-dataset', str(root / 'normalized_train'),
-        '--output-dir', str(root / 'normalized_train_signatures'),
+        '--input-dataset', str(root / 'exact_dedup_train'),
+        '--output-dir', str(output_dir / 'signatures'),
         '--num-proc', str(config['num_proc']),
         '--batch-size', str(config['signature_batch_size']),
         '--num-perm', str(settings['num_perm']), '--seed', str(settings['seed']),
@@ -60,14 +79,14 @@ def run_normalization_and_signatures(config, overwrite=False):
         config_path.write_text(json.dumps(config), encoding='utf-8')
         command = [
             sys.executable, str(PROJECT_ROOT / 'scripts/run_minhash_dedup_ngram_experiments.py'),
-            '--config', str(config_path), '--input-dataset', str(root / 'normalized_train'),
-            '--signatures-dir', str(root / 'normalized_train_signatures'),
-            '--output-dir', str(root / 'normalized_train_ngram_experiment'),
+            '--config', str(config_path), '--input-dataset', str(root / 'exact_dedup_train'),
+            '--signatures-dir', str(output_dir / 'signatures'),
+            '--output-dir', str(output_dir / 'results'),
         ]
         if overwrite:
             command.append('--overwrite')
         subprocess.run(command, cwd=PROJECT_ROOT, check=True)
-    logging.info('Normalization, signatures, and n-gram experiment complete: %s', root)
+    logging.info('Experiment complete; signatures and results saved under %s', output_dir)
 
 
 def main():
@@ -75,11 +94,12 @@ def main():
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--output-dir', type=Path, help='Experiment destination containing signatures/ and results/')
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     try:
-        run_normalization_and_signatures(read_config(args.config), args.overwrite)
+        run_normalization_and_signatures(read_config(args.config), args.overwrite, args.output_dir)
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'{error}\n')
 
