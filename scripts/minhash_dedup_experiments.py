@@ -59,7 +59,7 @@ def _load_completed_result(directory, metadata, overwrite):
     if overwrite or not directory.exists():
         return None
     marker = directory / 'result.json'
-    if not marker.is_file() or not (directory / 'retained_indices.csv').is_file():
+    if not all((directory / name).is_file() for name in ('result.json', 'retained_indices.csv', 'duplicate_pairs.csv')):
         raise ValueError(f'Incomplete experiment {directory}; use --overwrite')
     saved = json.loads(marker.read_text(encoding='utf-8'))
     if saved['metadata'] != metadata:
@@ -77,7 +77,9 @@ def _run_experiment(root, directory, dataset, signatures, parameters, text_colum
     # Measure deduplication separately from signature loading and output writing.
     deduplicator = MinHashDeduplicator(parameters, text_column=text_column)
     started = perf_counter()
-    keep, duplicates = deduplicator.deduplicate(dataset, signatures=signatures, desc=directory.name)
+    keep, duplicates, pairs = deduplicator.deduplicate(
+        dataset, signatures=signatures, desc=directory.name, return_pairs=True,
+    )
     elapsed = perf_counter() - started
     row = {
         'experiment_id': directory.name, 'ngram_size': parameters.ngram_size,
@@ -88,13 +90,14 @@ def _run_experiment(root, directory, dataset, signatures, parameters, text_colum
         'removed_percentage': 100 * len(duplicates) / len(dataset) if len(dataset) else 0.0,
         'candidate_total': deduplicator.last_total_candidates, 'runtime_seconds': elapsed,
         'retained_indices_path': str(indices),
+        'duplicate_pairs_path': str(directory / 'duplicate_pairs.csv'),
     }
 
     logging.info('%s: removed %d (%.2f%%)', directory.name, len(duplicates), row['removed_percentage'])
-    return row, keep
+    return row, keep, pairs
 
 
-def _write_experiment(directory, metadata, metrics, keep_indices):
+def _write_experiment(directory, metadata, metrics, keep_indices, duplicate_pairs):
     """Write retained indices and mark the experiment complete only after saving."""
     directory.mkdir(parents=True, exist_ok=True)
     marker = directory / 'result.json'
@@ -105,24 +108,34 @@ def _write_experiment(directory, metadata, metrics, keep_indices):
         writer = csv.writer(handle)
         writer.writerow(['document_index'])
         writer.writerows((index,) for index in keep_indices)
+    with (directory / 'duplicate_pairs.csv').open('w', newline='', encoding='utf-8') as handle:
+        writer = csv.DictWriter(handle, fieldnames=['original_index', 'duplicate_index', 'estimated_jaccard'])
+        writer.writeheader()
+        writer.writerows(duplicate_pairs)
     marker.write_text(
         json.dumps({'metadata': metadata, 'metrics': metrics}, indent=2) + '\n',
         encoding='utf-8',
     )
 
 
-def _save_results_table(path, results):
+def _save_results_table(path, results, preserve_existing=False):
     """Atomically replace the notebook's summary CSV after each completed result."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    if preserve_existing and path.is_file():
+        with path.open(newline='', encoding='utf-8') as handle:
+            previous = list(csv.DictReader(handle))
+        updated_ids = {row['experiment_id'] for row in results}
+        results = [row for row in previous if row['experiment_id'] not in updated_ids] + results
+    columns = list(dict.fromkeys(key for row in results for key in row))
     temporary = path.with_suffix('.csv.tmp')
     with temporary.open('w', newline='', encoding='utf-8') as handle:
-        writer = csv.DictWriter(handle, fieldnames=list(results[0]))
+        writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(results)
     temporary.replace(path)
 
 
-def run_experiments(config, kind, overwrite=False, *, input_dataset=None, signatures_dir=None, output_dir=None):
+def run_experiments(config, kind, overwrite=False, *, input_dataset=None, signatures_dir=None, output_dir=None, similarity_thresholds=None):
     """Validate saved signatures, run or reuse each experiment, and save summaries."""
     from datasets import load_from_disk
     from sources import TINYSTORIES_TRAIN_SOURCE
@@ -136,6 +149,10 @@ def run_experiments(config, kind, overwrite=False, *, input_dataset=None, signat
     results_path = (output_dir if output_dir is not None else root) / f'{kind}_results.csv'
     dataset = load_from_disk(str(input_dataset))
     text_column = TINYSTORIES_TRAIN_SOURCE.text_column
+    if similarity_thresholds is not None:
+        config = {**config, f'{kind}_experiment': {
+            **config[f'{kind}_experiment'], 'similarity_thresholds': similarity_thresholds,
+        }}
     experiments = list(_experiment_parameters(config, kind))
 
     # Check every required n-gram size before doing expensive work or writing outputs.
@@ -153,6 +170,7 @@ def run_experiments(config, kind, overwrite=False, *, input_dataset=None, signat
         # Reuse completed results only when their inputs and settings match.
         directory = experiment_dir / experiment_id
         metadata = _experiment_metadata(dataset, parameters, text_column)
+        metadata['input_dataset'] = str(input_dataset.resolve())
         row = _load_completed_result(directory, metadata, overwrite)
         if row is None:
             # Reuse signatures between threshold runs sharing the same n-gram size.
@@ -160,15 +178,15 @@ def run_experiments(config, kind, overwrite=False, *, input_dataset=None, signat
                 signatures = _load_signatures(signatures_dir, dataset, parameters, text_column)
                 previous_size = parameters.ngram_size
             # Compute the result, then persist it separately.
-            row, keep_indices = _run_experiment(
+            row, keep_indices, duplicate_pairs = _run_experiment(
                 root, directory, dataset, signatures, parameters, text_column,
             )
-            _write_experiment(directory, metadata, row, keep_indices)
-            del keep_indices
+            _write_experiment(directory, metadata, row, keep_indices, duplicate_pairs)
+            del keep_indices, duplicate_pairs
 
         # Checkpoint the summary after every result so interrupted sweeps can resume.
         results.append(row)
-        _save_results_table(results_path, results)
+        _save_results_table(results_path, results, preserve_existing=similarity_thresholds is not None)
     return results
 
 
@@ -180,6 +198,8 @@ def main(kind):
     parser.add_argument('--input-dataset', type=Path, help='Override the saved input dataset')
     parser.add_argument('--signatures-dir', type=Path, help='Directory containing ngram_<n> signature sets')
     parser.add_argument('--output-dir', type=Path, help='Directory for experiment results and retained indices')
+    if kind == 'threshold':
+        parser.add_argument('--thresholds', type=float, nargs='+', help='Run only these thresholds, preserving other saved rows')
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
@@ -190,6 +210,7 @@ def main(kind):
         run_experiments(
             config, kind, args.overwrite, input_dataset=args.input_dataset,
             signatures_dir=args.signatures_dir, output_dir=args.output_dir,
+            similarity_thresholds=getattr(args, 'thresholds', None),
         )
     except (OSError, ValueError, KeyError) as error:
         parser.exit(1, f'{error}\n')

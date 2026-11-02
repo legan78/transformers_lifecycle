@@ -143,16 +143,21 @@ class MinHashDeduplicator:
             seed=self.config.seed,
         )
 
+    def _find_duplicate(self, signature, candidates, signatures):
+        """Return the first matching retained index and estimated Jaccard score."""
+        for candidate in candidates:
+            candidate_index = int(candidate)
+            candidate_signature = self._restore_signature(signatures[candidate_index]["minhash_values"])
+            score = float(signature.jaccard(candidate_signature))
+            if not self.config.verify_similarity or score >= self.config.similarity_threshold:
+                return candidate_index, score
+        return None
+
     def _is_duplicate(self, signature, candidates, signatures):
         """Trust candidates or verify their estimated Jaccard similarity."""
         if not self.config.verify_similarity:
             return bool(candidates)
-        for candidate in candidates:
-            # Read saved signatures rather than recomputing text or n-grams.
-            candidate_signature = self._restore_signature(signatures[int(candidate)]["minhash_values"])
-            if signature.jaccard(candidate_signature) >= self.config.similarity_threshold:
-                return True
-        return False
+        return self._find_duplicate(signature, candidates, signatures) is not None
 
     def compute_signatures(self, dataset, num_proc=None, batch_size=256):
         """Compute reusable signatures in dataset row order.
@@ -193,7 +198,7 @@ class MinHashDeduplicator:
         )
 
 
-    def deduplicate(self, dataset, desc=None, num_proc=None, batch_size=256, *, signatures=None):
+    def deduplicate(self, dataset, desc=None, num_proc=None, batch_size=256, *, signatures=None, return_pairs=False):
         """Return kept indices and a duplicate-index set for a regular Dataset.
 
         Compute signatures in parallel, then query one fresh LSH index in input
@@ -203,6 +208,9 @@ class MinHashDeduplicator:
         Set num_proc=1 to disable multiprocessing. Supply signatures from
         compute_signatures() to skip hashing; dataset order, text column, and
         signature settings must match. Only thresholds may vary between runs.
+        With return_pairs=True, also return dictionaries containing original_index,
+        duplicate_index, and estimated_jaccard. Indices refer to this input dataset;
+        the original is the first matching retained candidate, not the best match.
         """
         self.last_total_candidates = 0
         config = self.config
@@ -214,7 +222,7 @@ class MinHashDeduplicator:
             raise ValueError(f"Missing text column: {self.text_column!r}")
         if len(dataset) == 0:
             _LOGGER.info("Total LSH candidates retrieved: %d", 0)
-            return [], set()
+            return ([], set(), []) if return_pairs else ([], set())
 
         if signatures is None:
             signatures = self.compute_signatures(
@@ -233,6 +241,7 @@ class MinHashDeduplicator:
 
         keep_indices = []
         duplicate_indices = set()
+        duplicate_pairs = []
         total_candidates = 0
 
         for index, example in tqdm.tqdm(enumerate(signatures), total=len(dataset), desc=desc):
@@ -246,7 +255,11 @@ class MinHashDeduplicator:
             # candidate is not proof that the requested similarity is satisfied.
             candidates = lsh.query(signature)
             total_candidates += len(candidates)
-            is_duplicate = self._is_duplicate(signature, candidates, signatures)
+            if return_pairs:
+                match = self._find_duplicate(signature, candidates, signatures)
+                is_duplicate = match is not None
+            else:
+                is_duplicate = self._is_duplicate(signature, candidates, signatures)
 
             # Only retained documents enter the index, preserving first-kept order.
             if not is_duplicate:
@@ -254,9 +267,16 @@ class MinHashDeduplicator:
                 keep_indices.append(index)
             else:
                 duplicate_indices.add(index)
+                if return_pairs:
+                    duplicate_pairs.append({
+                        'original_index': match[0], 'duplicate_index': index,
+                        'estimated_jaccard': match[1],
+                    })
 
         self.last_total_candidates = total_candidates
         _LOGGER.info("Total LSH candidates retrieved: %d", total_candidates)
+        if return_pairs:
+            return keep_indices, duplicate_indices, duplicate_pairs
         return keep_indices, duplicate_indices
 
 
