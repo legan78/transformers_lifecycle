@@ -1,19 +1,19 @@
 """Save reusable training MinHash signatures, independently for each n-gram size.
 
-Run: python scripts/run_minhash_signatures.py
-Matching completed outputs are skipped. Use --overwrite to regenerate outputs.
+Run: python scripts/run_minhash_signatures.py --config CONFIG --input_path INPUT --output_path OUTPUT
+Existing outputs require --overwrite to regenerate them.
 """
 
 import argparse
 import json
 import logging
+import shutil
 import sys
 from dataclasses import replace
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / 'src'))
-NGRAM_SIZES = [5, 10, 15, 20]
 
 
 def signature_metadata(dataset, config, text_column):
@@ -36,7 +36,8 @@ def load_saved_signatures(directory, dataset, config, text_column='text'):
     if not metadata_path.is_file() or not (directory / 'dataset').is_dir():
         raise FileNotFoundError(
             f'Missing or incomplete signatures at {directory}. '
-            'Run: python scripts/run_minhash_signatures.py (use --overwrite for incomplete outputs)'
+            'Generate signatures with run_minhash_signatures.py using --config, '
+            '--input_path, and --output_path (use --overwrite for incomplete outputs)'
         )
     metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
     if metadata != signature_metadata(dataset, config, text_column):
@@ -51,20 +52,21 @@ def load_saved_signatures(directory, dataset, config, text_column='text'):
 
 def save_signatures(dataset, config, directory, text_column='text', num_proc=7,
                     batch_size=256, overwrite=False):
-    """Save one configuration; config.json is written last to mark completion."""
+    """Generate and save one signature configuration without automatic reuse."""
     directory = Path(directory)
     if directory.exists() and not overwrite:
-        load_saved_signatures(directory, dataset, config, text_column)
-        logging.info('Reusing completed signatures: %s', directory)
-        return
+        raise FileExistsError(f'Signature outputs already exist at {directory}. Use --overwrite to replace them.')
     from deduplication import MinHashDeduplicator
 
-    # Invalidate the completion marker before replacing any saved data.
-    directory.mkdir(parents=True, exist_ok=True)
-    (directory / 'config.json').unlink(missing_ok=True)
     signatures = MinHashDeduplicator(config=config, text_column=text_column).compute_signatures(
         dataset, num_proc=num_proc, batch_size=batch_size,
     )
+    if overwrite:
+        if directory.is_dir() and not directory.is_symlink():
+            shutil.rmtree(directory)
+        else:
+            directory.unlink(missing_ok=True)
+    directory.mkdir(parents=True, exist_ok=True)
     signatures.save_to_disk(str(directory / 'dataset'))
     (directory / 'config.json').write_text(
         json.dumps(signature_metadata(dataset, config, text_column), indent=2) + '\n',
@@ -74,25 +76,46 @@ def save_signatures(dataset, config, directory, text_column='text', num_proc=7,
 
 
 def main():
+    from pipeline_config import read_config
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--artifacts-dir', type=Path, default=PROJECT_ROOT / 'artifacts/dataset_cycle')
-    parser.add_argument('--input-dataset', type=Path, help='Dataset saved with save_to_disk')
-    parser.add_argument('--output-dir', type=Path, help='Destination for per-n-gram signatures')
-    parser.add_argument('--text-column', default='text')
-    parser.add_argument('--ngram-sizes', type=int, nargs='+', default=NGRAM_SIZES)
-    parser.add_argument('--num-proc', type=int, default=7)
-    parser.add_argument('--batch-size', type=int, default=256)
-    parser.add_argument('--num-perm', type=int, default=128)
-    parser.add_argument('--seed', type=int, default=1)
-    parser.add_argument('--scheme', choices=['affine32', 'affine64', 'legacy'], default='affine32')
+    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--input_path', type=Path, required=True, help='Dataset saved with save_to_disk')
+    parser.add_argument('--output_path', type=Path, required=True, help='Destination for per-n-gram signatures')
+    parser.add_argument('--text-column')
+    parser.add_argument('--ngram-sizes', type=int, nargs='+')
+    parser.add_argument('--num-proc', type=int)
+    parser.add_argument('--batch-size', type=int)
+    parser.add_argument('--num-perm', type=int)
+    parser.add_argument('--seed', type=int)
+    parser.add_argument('--scheme', choices=['affine32', 'affine64', 'legacy'])
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
+    config = read_config(args.config)
+    settings = config['minhash']
+    if args.text_column is None:
+        args.text_column = config['source']['text_column']
+    if args.ngram_sizes is None:
+        args.ngram_sizes = settings['ngram_sizes']
+    if args.num_proc is None:
+        args.num_proc = config['num_proc']
+    if args.batch_size is None:
+        args.batch_size = config['signature_batch_size']
+    if args.num_perm is None:
+        args.num_perm = settings['num_perm']
+    if args.seed is None:
+        args.seed = settings['seed']
+    if args.scheme is None:
+        args.scheme = settings['scheme']
     if min(args.ngram_sizes + [args.num_proc, args.batch_size]) < 1:
         parser.error('n-gram sizes, --num-proc, and --batch-size must be positive')
-    input_path = args.input_dataset if args.input_dataset is not None else args.artifacts_dir / 'exact_dedup_train'
-    output_dir = args.output_dir if args.output_dir is not None else args.artifacts_dir / 'minhash_signatures'
+    input_path = args.input_path
+    output_dir = args.output_path
     if not input_path.is_dir():
         parser.error(f'Missing input dataset: {input_path}')
+    outputs = [output_dir / f'ngram_{size}' for size in args.ngram_sizes]
+    if not args.overwrite and any(path.exists() for path in outputs):
+        parser.error('Signature outputs already exist. Use --overwrite to replace them.')
     from datasets import load_from_disk
     from deduplication import MinHashConfig
 

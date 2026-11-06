@@ -3,7 +3,7 @@
 from dataclasses import dataclass, replace
 from typing import Optional
 
-from datasets import load_dataset
+from datasets import Dataset, load_dataset, load_from_disk
 
 
 # Dataset loading
@@ -64,6 +64,32 @@ def load_source(config: DatasetSourceConfig):
         revision=config.revision,
         streaming=config.streaming,
     )
+
+
+def load_configured_source(source, split='train'):
+    """Load one configured Hub or saved local split without changing its columns."""
+    dataset_id = source.get('dataset_id')
+    local_path = source.get('local_path')
+    if bool(dataset_id) == bool(local_path):
+        raise ValueError('Set exactly one of source.dataset_id or source.local_path')
+    if split not in source['splits']:
+        raise ValueError(f'Missing source split mapping: {split}')
+    source_split = source['splits'][split]
+    if dataset_id:
+        return load_dataset(
+            dataset_id, name=source.get('config_name'),
+            revision=source.get('revision'), split=source_split,
+        )
+    if source.get('config_name') is not None or source.get('revision') is not None:
+        raise ValueError('Local sources require config_name and revision to be null')
+    dataset = load_from_disk(local_path)
+    if isinstance(dataset, Dataset):
+        if source['splits'] != {'train': 'train'}:
+            raise ValueError("A single saved Dataset requires splits {'train': 'train'}")
+        return dataset
+    if source_split not in dataset:
+        raise ValueError(f'Missing local dataset split: {source_split}')
+    return dataset[source_split]
 
 
 def load_tiny_stories_dataset():

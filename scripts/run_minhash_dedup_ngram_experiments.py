@@ -1,18 +1,15 @@
-"""Run MinHash deduplication for each n-gram size using already saved signatures.
+"""Run MinHash deduplication for each configured n-gram size.
 
-From the project root:
-    python scripts/run_minhash_dedup_ngram_experiments.py --config configs/dataset_cycle.json
+Run: python scripts/run_minhash_dedup_ngram_experiments.py --config CONFIG --input_path INPUT --output_path OUTPUT
 
-Inputs under artifacts_dir:
-    exact_dedup_train/
-    minhash_signatures/ngram_<n>/dataset/
-    minhash_signatures/ngram_<n>/config.json
+INPUT is one dataset saved with save_to_disk.
+Optional --signatures_path contains ngram_<n>/dataset/ and ngram_<n>/config.json.
 
 The ngram_experiment configuration selects sizes and fixed thresholds; minhash
-specifies the matching permutation count, seed, and scheme. No signatures are
-computed. Results are written to ngram_results.csv, with retained indices and
-completion metadata under minhash_experiments/ngram/ngram_<n>/.
-Matching completed experiments are reused; use --overwrite to rerun them.
+specifies the permutation count, seed, and scheme. Without --signatures_path,
+signatures are computed in memory. OUTPUT contains ngram_results.csv, with
+retained indices and settings under ngram_<n>/.
+Existing outputs require --overwrite to replace them.
 """
 
 from minhash_dedup_experiments import main

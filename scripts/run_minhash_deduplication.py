@@ -1,13 +1,15 @@
-"""Apply the selected MinHash deduplication settings to training and validation.
+"""Apply the selected MinHash deduplication settings to each configured split.
 
-Run: python scripts/run_minhash_deduplication.py --config configs/dataset_cycle.json
-Matching saved signatures and completed results are reused. --overwrite rebuilds them.
+Run: python scripts/run_minhash_deduplication.py --config CONFIG --input_path INPUT --output_path OUTPUT
+INPUT contains exact_dedup_<split>/ for each configured processing split.
+Use --overwrite to replace existing outputs. Signatures are computed in memory.
 """
 
 import argparse
 import csv
 import json
 import logging
+import shutil
 from pathlib import Path
 import sys
 from time import perf_counter
@@ -17,48 +19,52 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / 'src'))
 
 
-def run_deduplication(config, overwrite=False):
+def run_deduplication(config, input_path, output_path, overwrite=False):
     from datasets import load_from_disk
     from deduplication import MinHashConfig, MinHashDeduplicator
-    from sources import TINYSTORIES_TRAIN_SOURCE, TINYSTORIES_VALIDATION_SOURCE
-    from scripts.run_minhash_signatures import save_signatures, load_saved_signatures
 
-    root = (PROJECT_ROOT / config['artifacts_dir']).resolve()
+    input_path = Path(input_path)
+    root = Path(output_path)
     selected = config['minhash_deduplication']
     parameters = MinHashConfig(**selected)
-    sources = {'train': TINYSTORIES_TRAIN_SOURCE, 'validation': TINYSTORIES_VALIDATION_SOURCE}
-    datasets = {split: load_from_disk(str(root / f'exact_dedup_{split}')) for split in sources}
+    splits = config['source']['splits']
+    text_column = config['source']['text_column']
+    for split in splits:
+        dataset_path = input_path / f'exact_dedup_{split}'
+        if not dataset_path.is_dir():
+            raise FileNotFoundError(f'Missing exact-deduplication dataset: {dataset_path}')
+    marker = root / 'minhash_dedup_config.json'
+    metrics_path = root / 'minhash_dedup_metrics.csv'
+    outputs = [root / f'minhash_dedup_{split}' for split in splits] + [
+        metrics_path, metrics_path.with_suffix('.csv.tmp'), marker,
+    ]
+    if not overwrite and any(path.exists() for path in outputs):
+        raise FileExistsError('MinHash-deduplication outputs already exist. Use --overwrite to replace them.')
+    datasets = {split: load_from_disk(str(input_path / f'exact_dedup_{split}')) for split in splits}
     metadata = {
         'settings': selected,
         'inputs': {split: {'fingerprint': dataset._fingerprint, 'row_count': len(dataset),
-                           'text_column': sources[split].text_column}
+                           'text_column': text_column}
                    for split, dataset in datasets.items()},
     }
-    marker = root / 'minhash_dedup_config.json'
-    metrics_path = root / 'minhash_dedup_metrics.csv'
-    outputs = [root / f'minhash_dedup_{split}' for split in sources] + [metrics_path, marker]
-    if any(path.exists() for path in outputs) and not overwrite:
-        if not all(path.exists() for path in outputs):
-            raise ValueError('Incomplete MinHash deduplication outputs; use --overwrite')
-        if json.loads(marker.read_text(encoding='utf-8')) != metadata:
-            raise ValueError('Incompatible MinHash deduplication outputs; use --overwrite')
-        logging.info('Reusing completed MinHash deduplication datasets')
-        return
     marker.unlink(missing_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
     rows = []
     for split, dataset in datasets.items():
-        text_column = sources[split].text_column
-        # Separate production caches from the optional demonstration sweeps.
-        directory = root / 'minhash_signatures' / f'production_{split}' / f'ngram_{parameters.ngram_size}'
-        save_signatures(dataset, parameters, directory, text_column=text_column,
-                        num_proc=config['num_proc'], batch_size=config['signature_batch_size'],
-                        overwrite=overwrite)
-        signatures = load_saved_signatures(directory, dataset, parameters, text_column=text_column)
         deduplicator = MinHashDeduplicator(config=parameters, text_column=text_column)
+        signatures = deduplicator.compute_signatures(
+            dataset, num_proc=config['num_proc'], batch_size=config['signature_batch_size'],
+        )
         started = perf_counter()
         keep, duplicates = deduplicator.deduplicate(dataset, signatures=signatures, desc=f'{split}: MinHash deduplication')
         elapsed = perf_counter() - started
-        dataset.select(keep).save_to_disk(str(root / f'minhash_dedup_{split}'))
+        destination = root / f'minhash_dedup_{split}'
+        if overwrite:
+            if destination.is_dir() and not destination.is_symlink():
+                shutil.rmtree(destination)
+            else:
+                destination.unlink(missing_ok=True)
+        dataset.select(keep).save_to_disk(str(destination))
         rows.append({
             'split': split, **selected, 'before': len(dataset), 'after': len(keep),
             'removed_count': len(duplicates),
@@ -77,17 +83,19 @@ def run_deduplication(config, overwrite=False):
 
 
 def main():
-    from scripts.run_dataset_pipeline import read_config
+    from pipeline_config import read_config
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--input_path', type=Path, required=True)
+    parser.add_argument('--output_path', type=Path, required=True)
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     logging.getLogger('httpx').setLevel(logging.ERROR)
     logging.getLogger('httpcore').setLevel(logging.ERROR)
     try:
-        run_deduplication(read_config(args.config), args.overwrite)
+        run_deduplication(read_config(args.config), args.input_path, args.output_path, args.overwrite)
     except (OSError, ValueError, KeyError) as error:
         parser.exit(1, f'{error}\n')
 

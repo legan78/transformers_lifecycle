@@ -1,14 +1,15 @@
 """Deduplicate saved normalized datasets and save metrics and matched row pairs.
 
 Run: python scripts/run_exact_deduplication.py --config CONFIG --input_path INPUT --output_path OUTPUT
-INPUT contains normalized_train/ and normalized_validation/.
-Pair indices reference normalized_train/ or normalized_validation/ before hashing.
+INPUT contains normalized_<split>/ for each configured processing split.
+Pair indices reference the corresponding normalized_<split>/ before hashing.
 Use --overwrite to replace existing exact-deduplication outputs.
 """
 
 import argparse
 import csv
 import logging
+import shutil
 import sys
 from pathlib import Path
 
@@ -37,7 +38,7 @@ def deduplicate_dataset(dataset, text_column='text', num_proc=7, batch_size=1000
 
 
 def main():
-    from scripts.run_dataset_pipeline import read_config
+    from pipeline_config import read_config
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', type=Path, required=True)
@@ -55,14 +56,15 @@ def main():
     if args.num_proc < 1 or args.batch_size < 1:
         parser.error('--num-proc and --batch-size must be positive')
     root = args.output_path
-    for name in ('normalized_train', 'normalized_validation'):
+    splits = config['source']['splits']
+    text_column = config['source']['text_column']
+    for name in (f'normalized_{split}' for split in splits):
         if not (args.input_path / name).is_dir():
             parser.error(f'Missing preparation dataset: {args.input_path / name}')
-    outputs = ['exact_dedup_train', 'exact_dedup_validation', 'exact_dedup_metrics.csv', 'exact_duplicate_pairs.csv']
+    outputs = [f'exact_dedup_{split}' for split in splits] + ['exact_dedup_metrics.csv', 'exact_duplicate_pairs.csv']
     if not args.overwrite and any((root / name).exists() for name in outputs):
         parser.error('Exact-deduplication outputs already exist. Use --overwrite to replace them.')
     from datasets import load_from_disk
-    from sources import TINYSTORIES_TRAIN_SOURCE, TINYSTORIES_VALIDATION_SOURCE
 
     logging.basicConfig(level=logging.INFO)
     logging.getLogger('httpx').setLevel(logging.ERROR)
@@ -72,19 +74,23 @@ def main():
     with (root / 'exact_duplicate_pairs.csv').open('w', newline='', encoding='utf-8') as handle:
         writer = csv.writer(handle)
         writer.writerow(['split', 'original_index', 'duplicate_index'])
-        for split, suffix, source in [
-            ('Training', 'train', TINYSTORIES_TRAIN_SOURCE),
-            ('Validation', 'validation', TINYSTORIES_VALIDATION_SOURCE),
-        ]:
-            dataset = load_from_disk(str(args.input_path / f'normalized_{suffix}'))
+        for split in splits:
+            label = {'train': 'Training', 'validation': 'Validation'}.get(split, split)
+            dataset = load_from_disk(str(args.input_path / f'normalized_{split}'))
             cleaned, pairs, metrics = deduplicate_dataset(
-                dataset, text_column=source.text_column, num_proc=args.num_proc, batch_size=args.batch_size,
+                dataset, text_column=text_column, num_proc=args.num_proc, batch_size=args.batch_size,
             )
-            cleaned.save_to_disk(str(root / f'exact_dedup_{suffix}'))
-            writer.writerows((split, original, duplicate) for original, duplicate in pairs)
-            metrics_rows.append({'split': split, **metrics})
+            destination = root / f'exact_dedup_{split}'
+            if args.overwrite:
+                if destination.is_dir() and not destination.is_symlink():
+                    shutil.rmtree(destination)
+                else:
+                    destination.unlink(missing_ok=True)
+            cleaned.save_to_disk(str(destination))
+            writer.writerows((label, original, duplicate) for original, duplicate in pairs)
+            metrics_rows.append({'split': label, **metrics})
             logging.info('%s: removed %d exact duplicates (%.2f%%); %d -> %d documents',
-                         split, metrics['removed_count'], metrics['removed_percentage'], metrics['before'], metrics['after'])
+                         label, metrics['removed_count'], metrics['removed_percentage'], metrics['before'], metrics['after'])
             del dataset, cleaned, pairs
     with (root / 'exact_dedup_metrics.csv').open('w', newline='', encoding='utf-8') as handle:
         writer = csv.DictWriter(handle, fieldnames=list(metrics_rows[0]))
