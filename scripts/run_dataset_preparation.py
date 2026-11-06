@@ -1,6 +1,7 @@
 """Normalize and filter TinyStories, saving reusable datasets and cleaning metrics.
 
-Run from the project root: python scripts/run_dataset_preparation.py
+Run: python scripts/run_dataset_preparation.py --config CONFIG --output_path OUTPUT
+Paths are used directly; relative paths start at the current working directory.
 Use --overwrite to replace existing preparation outputs.
 """
 
@@ -12,6 +13,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / 'src'))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 NUM_PROC = 7
 BATCH_SIZE = 1000
@@ -53,17 +55,27 @@ def prepare_dataset(dataset, text_column='text', num_proc=NUM_PROC, batch_size=B
 
 
 def main():
+    from scripts.run_dataset_pipeline import read_config
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output-dir', type=Path, default=PROJECT_ROOT / 'artifacts/dataset_cycle')
-    parser.add_argument('--num-proc', type=int, default=NUM_PROC)
-    parser.add_argument('--batch-size', type=int, default=BATCH_SIZE)
-    parser.add_argument('--max-new-lines', type=int, default=MAX_NEW_LINES)
+    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--output_path', type=Path, required=True)
+    parser.add_argument('--num-proc', type=int)
+    parser.add_argument('--batch-size', type=int)
+    parser.add_argument('--max-new-lines', type=int)
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
+    config = read_config(args.config)
+    if args.num_proc is None:
+        args.num_proc = config['num_proc']
+    if args.batch_size is None:
+        args.batch_size = config['batch_size']
+    if args.max_new_lines is None:
+        args.max_new_lines = config['normalization']['max_new_lines']
     if min(args.num_proc, args.batch_size, args.max_new_lines) < 1:
         parser.error('--num-proc, --batch-size, and --max-new-lines must be positive')
     outputs = ['normalized_train', 'normalized_validation', 'cleaning_metrics.csv']
-    existing = [str(args.output_dir / name) for name in outputs if (args.output_dir / name).exists()]
+    existing = [str(args.output_path / name) for name in outputs if (args.output_path / name).exists()]
     if existing and not args.overwrite:
         parser.error('Preparation outputs already exist. Use --overwrite to replace them: ' + ', '.join(existing))
     from sources import TINYSTORIES_TRAIN_SOURCE, TINYSTORIES_VALIDATION_SOURCE, load_source
@@ -71,7 +83,7 @@ def main():
     logging.basicConfig(level=logging.INFO)
     logging.getLogger('httpx').setLevel(logging.ERROR)
     logging.getLogger('httpcore').setLevel(logging.ERROR)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    args.output_path.mkdir(parents=True, exist_ok=True)
     rows = []
     for split, source, directory in [
         ('Training', TINYSTORIES_TRAIN_SOURCE, 'normalized_train'),
@@ -81,16 +93,16 @@ def main():
             load_source(source), text_column=source.text_column,
             num_proc=args.num_proc, batch_size=args.batch_size, max_new_lines=args.max_new_lines,
         )
-        dataset.save_to_disk(str(args.output_dir / directory))
+        dataset.save_to_disk(str(args.output_path / directory))
         rows.append({'split': split, **metrics})
         logging.info('%s: %d documents after normalization; %d after empty removal (%.2f%% removed)',
                      split, metrics['after_normalization'], metrics['after_empty_removal'], metrics['removed_percentage'])
         del dataset
-    with (args.output_dir / 'cleaning_metrics.csv').open('w', newline='', encoding='utf-8') as handle:
+    with (args.output_path / 'cleaning_metrics.csv').open('w', newline='', encoding='utf-8') as handle:
         writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
-    logging.info('Preparation artifacts saved to %s', args.output_dir)
+    logging.info('Preparation artifacts saved to %s', args.output_path)
 
 
 if __name__ == '__main__':

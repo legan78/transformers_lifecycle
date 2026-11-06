@@ -1,10 +1,32 @@
 {
-  "artifacts_dir": "artifacts/dataset_cycle",
+  "source": {
+    "dataset_id": "roneneldan/TinyStories",
+    "local_path": null,
+    "config_name": null,
+    "revision": null,
+    "splits": {
+      "train": "train",
+      "validation": "validation"
+    },
+    "text_column": "text"
+  },
   "num_proc": 7,
   "batch_size": 256,
   "signature_batch_size": 256,
   "normalization": {
+    "transformations": [
+      "line_endings",
+      "unicode",
+      "collapse_spaces",
+      "limit_newlines",
+      "strip"
+    ],
+    "unicode_form": "NFC",
     "max_new_lines": 3
+  },
+  "tokenizer": {
+    "name_or_path": "gpt2",
+    "revision": null
   },
   "minhash": {
     "ngram_sizes": [

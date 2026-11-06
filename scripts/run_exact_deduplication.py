@@ -1,6 +1,7 @@
 """Deduplicate saved normalized datasets and save metrics and matched row pairs.
 
-Run: python scripts/run_exact_deduplication.py
+Run: python scripts/run_exact_deduplication.py --config CONFIG --input_path INPUT --output_path OUTPUT
+INPUT contains normalized_train/ and normalized_validation/.
 Pair indices reference normalized_train/ or normalized_validation/ before hashing.
 Use --overwrite to replace existing exact-deduplication outputs.
 """
@@ -13,6 +14,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / 'src'))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def deduplicate_dataset(dataset, text_column='text', num_proc=7, batch_size=1000):
@@ -35,18 +37,27 @@ def deduplicate_dataset(dataset, text_column='text', num_proc=7, batch_size=1000
 
 
 def main():
+    from scripts.run_dataset_pipeline import read_config
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--artifacts-dir', type=Path, default=PROJECT_ROOT / 'artifacts/dataset_cycle')
-    parser.add_argument('--num-proc', type=int, default=7)
-    parser.add_argument('--batch-size', type=int, default=1000)
+    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--input_path', type=Path, required=True)
+    parser.add_argument('--output_path', type=Path, required=True)
+    parser.add_argument('--num-proc', type=int)
+    parser.add_argument('--batch-size', type=int)
     parser.add_argument('--overwrite', action='store_true')
     args = parser.parse_args()
+    config = read_config(args.config)
+    if args.num_proc is None:
+        args.num_proc = config['num_proc']
+    if args.batch_size is None:
+        args.batch_size = config['batch_size']
     if args.num_proc < 1 or args.batch_size < 1:
         parser.error('--num-proc and --batch-size must be positive')
-    root = args.artifacts_dir
+    root = args.output_path
     for name in ('normalized_train', 'normalized_validation'):
-        if not (root / name).is_dir():
-            parser.error('Missing preparation datasets. Run: python scripts/run_dataset_preparation.py')
+        if not (args.input_path / name).is_dir():
+            parser.error(f'Missing preparation dataset: {args.input_path / name}')
     outputs = ['exact_dedup_train', 'exact_dedup_validation', 'exact_dedup_metrics.csv', 'exact_duplicate_pairs.csv']
     if not args.overwrite and any((root / name).exists() for name in outputs):
         parser.error('Exact-deduplication outputs already exist. Use --overwrite to replace them.')
@@ -57,6 +68,7 @@ def main():
     logging.getLogger('httpx').setLevel(logging.ERROR)
     logging.getLogger('httpcore').setLevel(logging.ERROR)
     metrics_rows = []
+    root.mkdir(parents=True, exist_ok=True)
     with (root / 'exact_duplicate_pairs.csv').open('w', newline='', encoding='utf-8') as handle:
         writer = csv.writer(handle)
         writer.writerow(['split', 'original_index', 'duplicate_index'])
@@ -64,7 +76,7 @@ def main():
             ('Training', 'train', TINYSTORIES_TRAIN_SOURCE),
             ('Validation', 'validation', TINYSTORIES_VALIDATION_SOURCE),
         ]:
-            dataset = load_from_disk(str(root / f'normalized_{suffix}'))
+            dataset = load_from_disk(str(args.input_path / f'normalized_{suffix}'))
             cleaned, pairs, metrics = deduplicate_dataset(
                 dataset, text_column=source.text_column, num_proc=args.num_proc, batch_size=args.batch_size,
             )

@@ -1,6 +1,6 @@
 """Save raw-training diagnosis artifacts without saving tokenized documents.
 
-Run from the project root: python scripts/run_dataset_diagnosis.py
+Run: python scripts/run_dataset_diagnosis.py --config CONFIG --output_path OUTPUT
 Existing diagnosis files are overwritten. Tokenization uses full documents,
 matching the notebook's original behavior (no truncation).
 """
@@ -17,6 +17,7 @@ import tqdm
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / 'src'))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 
 def save_diagnosis(dataset, tokenizer, output_dir, text_column='text', batch_size=1000):
@@ -60,10 +61,16 @@ def save_diagnosis(dataset, tokenizer, output_dir, text_column='text', batch_siz
 
 
 def main():
+    from scripts.run_dataset_pipeline import read_config
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--output-dir', type=Path, default=PROJECT_ROOT / 'artifacts/dataset_cycle/diagnosis')
-    parser.add_argument('--batch-size', type=int, default=1000)
+    parser.add_argument('--config', type=Path, required=True)
+    parser.add_argument('--output_path', type=Path, required=True)
+    parser.add_argument('--batch-size', type=int)
     args = parser.parse_args()
+    config = read_config(args.config)
+    if args.batch_size is None:
+        args.batch_size = config['batch_size']
     if args.batch_size < 1:
         parser.error('--batch-size must be positive')
     from sources import TINYSTORIES_TRAIN_SOURCE, load_source
@@ -74,9 +81,9 @@ def main():
     logging.getLogger('httpcore').setLevel(logging.ERROR)
     dataset = load_source(TINYSTORIES_TRAIN_SOURCE)
     tokenizer = GPT2TokenizerFast.from_pretrained('gpt2')
-    save_diagnosis(dataset, tokenizer, args.output_dir,
+    save_diagnosis(dataset, tokenizer, args.output_path,
                    text_column=TINYSTORIES_TRAIN_SOURCE.text_column, batch_size=args.batch_size)
-    logging.info('Diagnosis artifacts saved to %s', args.output_dir)
+    logging.info('Diagnosis artifacts saved to %s', args.output_path)
 
 
 if __name__ == '__main__':
