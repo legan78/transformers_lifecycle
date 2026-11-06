@@ -5,6 +5,7 @@ Uses minhash.ngram_sizes and the preparation settings from the JSON.
 The experiment runs on training data after exact deduplication.
 OUTPUT contains preparation and exact-deduplication artifacts, signatures/, and results/.
 Use --overwrite to replace existing outputs and rerun all four stages.
+Use --save_dataset to also export retained rows for each n-gram experiment.
 """
 
 import argparse
@@ -19,7 +20,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / 'src'))
 
 
-def run_normalization_and_signatures(config, output_path, overwrite=False):
+def run_normalization_and_signatures(config, output_path, overwrite=False, *, save_dataset=False):
     """Run preparation, exact deduplication, signatures, and the n-gram sweep."""
     root = Path(output_path)
     splits = config['source']['splits']
@@ -54,6 +55,8 @@ def run_normalization_and_signatures(config, output_path, overwrite=False):
                        '--config', str(config_path), *arguments]
             if overwrite:
                 command.append('--overwrite')
+            if save_dataset and script == 'run_minhash_dedup_ngram_experiments.py':
+                command.append('--save_dataset')
             subprocess.run(command, check=True)
     logging.info('Experiment complete; artifacts saved under %s', root)
 
@@ -65,10 +68,12 @@ def main():
     parser.add_argument('--config', type=Path, required=True)
     parser.add_argument('--output_path', type=Path, required=True)
     parser.add_argument('--overwrite', action='store_true')
+    parser.add_argument('--save_dataset', action='store_true', help='Also save retained rows for each n-gram experiment')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     try:
-        run_normalization_and_signatures(read_config(args.config), args.output_path, args.overwrite)
+        run_normalization_and_signatures(read_config(args.config), args.output_path, args.overwrite,
+                                         save_dataset=args.save_dataset)
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
         parser.exit(1, f'{error}\n')
 

@@ -9,6 +9,7 @@ The ngram_experiment configuration selects sizes and fixed thresholds; minhash
 specifies the permutation count, seed, and scheme. Without --signatures_path,
 signatures are computed in memory. OUTPUT contains ngram_results.csv, with
 retained indices and settings under ngram_<n>/.
+Use --save_dataset to also save retained rows under ngram_<n>/dataset/.
 Existing outputs require --overwrite to replace them.
 """
 

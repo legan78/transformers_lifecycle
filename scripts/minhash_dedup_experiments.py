@@ -4,6 +4,7 @@ import argparse
 import csv
 import json
 import logging
+import shutil
 from pathlib import Path
 import sys
 from time import perf_counter
@@ -50,7 +51,7 @@ def _experiment_metadata(dataset, parameters, text_column):
         **signature_metadata(dataset, parameters, text_column),
         'lsh_threshold': parameters.lsh_threshold,
         'similarity_threshold': parameters.similarity_threshold,
-        'verify_similarity': True,
+        'verify_similarity': parameters.verify_similarity,
     }
 
 
@@ -83,9 +84,18 @@ def _run_experiment(directory, dataset, signatures, parameters, text_column):
     return row, keep, pairs
 
 
-def _write_experiment(directory, metadata, metrics, keep_indices, duplicate_pairs):
+def _write_experiment(directory, metadata, metrics, keep_indices, duplicate_pairs, *,
+                      dataset=None, overwrite=False):
     """Save retained indices, duplicate pairs, settings, and metrics."""
     directory.mkdir(parents=True, exist_ok=True)
+    dataset_path = directory / 'dataset'
+    if overwrite:
+        if dataset_path.is_dir() and not dataset_path.is_symlink():
+            shutil.rmtree(dataset_path)
+        else:
+            dataset_path.unlink(missing_ok=True)
+    if dataset is not None:
+        dataset.select(keep_indices).save_to_disk(str(dataset_path))
     marker = directory / 'result.json'
     with (directory / 'retained_indices.csv').open('w', newline='', encoding='utf-8') as handle:
         writer = csv.writer(handle)
@@ -113,7 +123,8 @@ def _save_results_table(path, results):
     temporary.replace(path)
 
 
-def run_experiments(config, kind, input_path, output_path, overwrite=False, *, signatures_path=None, similarity_thresholds=None):
+def run_experiments(config, kind, input_path, output_path, overwrite=False, *, signatures_path=None,
+                    similarity_thresholds=None, save_dataset=False):
     """Run sweeps on explicit inputs, optionally reusing saved signatures."""
     from datasets import load_from_disk
     from deduplication import MinHashDeduplicator
@@ -135,6 +146,15 @@ def run_experiments(config, kind, input_path, output_path, overwrite=False, *, s
     ]
     if not overwrite and any(path.exists() for path in outputs):
         raise FileExistsError('Experiment outputs already exist. Use --overwrite or a new --output_path.')
+    if overwrite:
+        protected = [input_dataset] + ([signatures_dir] if signatures_dir is not None else [])
+        for experiment_id, _ in experiments:
+            dataset_path = experiment_dir / experiment_id / 'dataset'
+            if dataset_path.exists() and any(
+                (path.exists() and dataset_path.samefile(path)) or dataset_path in path.parents
+                for path in protected
+            ):
+                raise ValueError(f'Cannot overwrite an input dataset or signatures at {dataset_path}')
     dataset = load_from_disk(str(input_dataset))
 
     # Check every required n-gram size before doing expensive work or writing outputs.
@@ -152,6 +172,14 @@ def run_experiments(config, kind, input_path, output_path, overwrite=False, *, s
         directory = experiment_dir / experiment_id
         metadata = _experiment_metadata(dataset, parameters, text_column)
         metadata['input_dataset'] = str(input_dataset)
+        metadata['index_base'] = 0
+        metadata['signatures_path'] = (
+            str(signatures_dir / f'ngram_{parameters.ngram_size}') if signatures_dir is not None else None
+        )
+        metadata['save_dataset'] = save_dataset
+        if signatures_dir is None:
+            metadata['num_proc'] = config['num_proc']
+            metadata['signature_batch_size'] = config['signature_batch_size']
         # Share signatures between threshold runs using the same n-gram size.
         if previous_size != parameters.ngram_size:
             if signatures_dir is not None:
@@ -164,7 +192,9 @@ def run_experiments(config, kind, input_path, output_path, overwrite=False, *, s
         row, keep_indices, duplicate_pairs = _run_experiment(
             directory, dataset, signatures, parameters, text_column,
         )
-        _write_experiment(directory, metadata, row, keep_indices, duplicate_pairs)
+        row['dataset_path'] = str(directory / 'dataset') if save_dataset else None
+        _write_experiment(directory, metadata, row, keep_indices, duplicate_pairs,
+                          dataset=dataset if save_dataset else None, overwrite=overwrite)
         del keep_indices, duplicate_pairs
         results.append(row)
     _save_results_table(results_path, results)
@@ -179,6 +209,7 @@ def main(kind):
     parser.add_argument('--input_path', type=Path, required=True, help='Dataset saved with save_to_disk')
     parser.add_argument('--output_path', type=Path, required=True, help='Directory for experiment results and retained indices')
     parser.add_argument('--signatures_path', type=Path, help='Reuse saved ngram_<n> signature sets; otherwise compute signatures')
+    parser.add_argument('--save_dataset', action='store_true', help='Also save retained rows under each experiment directory')
     if kind == 'threshold':
         parser.add_argument('--thresholds', type=float, nargs='+', help='Run only these similarity thresholds')
     parser.add_argument('--overwrite', action='store_true')
@@ -192,6 +223,7 @@ def main(kind):
             config, kind, args.input_path, args.output_path, args.overwrite,
             signatures_path=args.signatures_path,
             similarity_thresholds=getattr(args, 'thresholds', None),
+            save_dataset=args.save_dataset,
         )
     except (OSError, ValueError, KeyError) as error:
         parser.exit(1, f'{error}\n')

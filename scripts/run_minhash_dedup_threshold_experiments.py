@@ -9,6 +9,7 @@ threshold, and the similarity thresholds to compare. The minhash section must
 match the saved signatures' permutation count, seed, and scheme.
 
 OUTPUT contains threshold_results.csv and retained indices under threshold_<value>/.
+Use --save_dataset to also save retained rows under threshold_<value>/dataset/.
 Existing outputs require --overwrite to replace them.
 """
 
