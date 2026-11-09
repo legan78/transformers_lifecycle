@@ -88,12 +88,14 @@ def load_source_dataset(metadata, input_dataset=None):
     return dataset
 
 
-def load_removed_documents(directory, ngram_size, input_dataset, count=5, text_column='text'):
-    """Preview removed rows without loading another full copy of the dataset."""
+def load_removed_documents(directory, ngram_size, input_dataset=None, count=5, text_column=None):
+    """Preview removed rows using the saved input reference and text column by default."""
     directory = Path(directory)
     experiment_id = f'ngram_{ngram_size}'
     metadata = json.loads((directory / experiment_id / 'result.json').read_text(encoding='utf-8'))['metadata']
     dataset = load_source_dataset(metadata, input_dataset)
+    if text_column is None:
+        text_column = metadata['text_column']
     retained = set(load_retained_indices(directory, experiment_id))
     removed = list(islice((index for index in range(len(dataset)) if index not in retained), count))
     table = dataset.select(removed).select_columns([text_column]).to_pandas()
